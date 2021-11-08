@@ -24,13 +24,13 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
 #### 1. Minimization Step
 
 <div align="center">
-  <img src="figs/step1.png" width="750px" />
+  <img src="figs/step1.png" width="650px" />
 </div>
 
 #### 2. Maximization Step
 
 <div align="center">
-  <img src="figs/step2.png" width="780px" />
+  <img src="figs/step2.png" width="680px" />
 </div>
 
 
