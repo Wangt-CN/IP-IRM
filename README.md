@@ -9,7 +9,7 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
 
 
 
-
+<br />
 
 ## IP-IRM Algorithm
 
@@ -33,6 +33,9 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
   <img src="figs/step2.png" width="780px" />
 </div>
 
+
+<br />
+
 ## Prerequisites
 
 - Python 3.7 
@@ -42,17 +45,18 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
 - tqdm
 
 
+<br />
 
 ## Training
 
 #### 1. IP-IRM Main Parameters
 
 - `--maximize_iter`: when to perform the maximize step?
-- `--env_num`: $k$, the number of the subsets (orbits)
+- `--env_num`: <img src="http://chart.googleapis.com/chart?cht=tx&chl= $k$" style="border:none;">, the number of the subsets (orbits)
 - `--constrain`:  if perform the constrain for partition updating? (constrain the difference of the number of samples in the 2 subsets not be too large)
 - `--retain_group`: retain the previous partition?
-- `--penalty_weight`: the penalty (irm loss) weight ($\lambda_1$)
-- `--irm_weight_maxim`: the irm loss weight in partition maximization ($\lambda_2$)
+- `--penalty_weight`: the penalty (irm loss) weight (<img src="http://chart.googleapis.com/chart?cht=tx&chl= $\lambda_1$" style="border:none;">)
+- `--irm_weight_maxim`: the irm loss weight in partition maximization (<img src="http://chart.googleapis.com/chart?cht=tx&chl= $\lambda_2$" style="border:none;">)
 - `--keep_cont`: maintain the standard SSL loss as the first partition
 - `--offline`: if update the partition offline? (i.e., first extract the feature and then optimize the partition)
 - `--mixup_max`: if using mixup for maximization step? (We find this option can usually gets a little bit better results but consumes more time)
@@ -70,7 +74,7 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
 - **Soft Contrastive Loss**: To enable the calculation of the contrastive loss with the partition updating in maximization, we also change the contrastive into a soft version.
   - `def soft_contrastive_loss()` in `utils.py`
   - `soft_contrastive_loss_mixup_online() / soft_contrastive_loss_mixup_offline()` in `utils_mixup.py`
-- **Partition** $P^{*}$ : `updated_split` in the code (follow the order of the dataset)
+- **Partition** <img src="http://chart.googleapis.com/chart?cht=tx&chl= $P^{*}$" style="border:none;"> : `updated_split` in the code (follow the order of the dataset)
 
 
 
@@ -102,7 +106,7 @@ CUDA_VISIBLE_DEVICES=0,1 python linear.py --model_path results/STL/IPIRM_STL_epo
 
 
 
-
+<br />
 
 ## Tips for adopting IP-IRM
 
@@ -115,6 +119,7 @@ Here we provide some of our experience when improving IP-IRM which may provide s
 - The spirits of the IP-IRM (i.e., data partition) can also be utilized into other tasks, even other domains (e.g., pls check our ICCV2021 paper on OOD generalization)
 
 
+<br />
 
 ## BibTex
 
@@ -137,7 +142,7 @@ If you find our codes helpful, please cite our paper:
 }
 ```
 
-
+<br />
 
 ## Acknowledgement
 
