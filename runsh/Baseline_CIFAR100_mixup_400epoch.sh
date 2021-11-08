@@ -1,0 +1,2 @@
+CUDA_VISIBLE_DEVICES=2,3 python main_mixup.py --baseline --dataset CIFAR100 --epochs 400 --name Baseline_CIFAR100_mixup_400epoch
+CUDA_VISIBLE_DEVICES=2,3 python linear.py --model_path results/CIFAR100/Baseline_CIFAR100_mixup_400epoch/model_400.pth --dataset CIFAR100 --txt --name Baseline_CIFAR100_mixup_400epoch

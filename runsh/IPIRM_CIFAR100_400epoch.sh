@@ -1,0 +1,2 @@
+CUDA_VISIBLE_DEVICES=2,3 python main.py --penalty_weight 0.2 --irm_weight_maxim 0.2 --maximize_iter 50 --random_init --constrain --constrain_relax --dataset CIFAR100 --epochs 400 --offline --keep_cont --retain_group --name IPIRM_CIFAR100_400epoch
+CUDA_VISIBLE_DEVICES=2,3 python linear.py --model_path results/CIFAR100/IPIRM_CIFAR100_400epoch/model_400.pth --dataset CIFAR100 --txt --name IPIRM_CIFAR100_400epoch

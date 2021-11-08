@@ -1,0 +1,481 @@
+import argparse
+import os
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+import numpy as np
+import torch
+from torch import nn, optim, autograd
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+import utils
+from model import Model
+import utils_mixup
+
+
+def get_negative_mask(batch_size):
+    negative_mask = torch.ones((batch_size, 2 * batch_size), dtype=bool)
+    for i in range(batch_size):
+        negative_mask[i, i] = 0
+        negative_mask[i, i + batch_size] = 0
+
+    negative_mask = torch.cat((negative_mask, negative_mask), 0)
+    return negative_mask
+
+
+def train(net, data_loader, train_optimizer, temperature, debiased, tau_plus):
+    net.train()
+    total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
+    criterion = torch.nn.CrossEntropyLoss()
+
+    for pos_1, pos_2, target, idx in train_bar:
+        pos_1, pos_2 = pos_1.cuda(non_blocking=True), pos_2.cuda(non_blocking=True)
+        bsz = pos_1.shape[0]
+        # mixup
+        pos_1, labels_aux, lam = utils_mixup.mixup(pos_1, args.alpha)
+
+        feature_1, out_1 = net(pos_1)
+        feature_2, out_2 = net(pos_2)
+
+        logits = out_1.mm(out_2.t()) / args.temperature
+        labels = torch.arange(bsz, dtype=torch.long).cuda()
+        loss = (lam * criterion(logits, labels) + (1. - lam) * criterion(logits, labels_aux)).mean()
+
+        train_optimizer.zero_grad()
+        loss.backward()
+        train_optimizer.step()
+
+        total_num += batch_size
+        total_loss += loss.item() * batch_size
+
+        train_bar.set_description('Train Epoch: [{}/{}] Loss: {:.4f}'.format(epoch, epochs, total_loss / total_num))
+
+    return total_loss / total_num
+
+
+
+def train_env_mixup_full_noretaingp(net, data_loader, train_optimizer, temperature, updated_split):
+    net.train()
+    total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
+
+    criterion = torch.nn.CrossEntropyLoss()
+
+    for batch_index, data_env in enumerate(train_bar):
+        # extract all feature
+        pos_1_all, pos_2_all, indexs = data_env[0], data_env[1], data_env[-1]
+        pos_1_all, pos_2_all = pos_1_all.cuda(non_blocking=True), pos_2_all.cuda(non_blocking=True)
+        bsz = pos_1_all.shape[0]
+        # mixup
+        pos_1_all_mixup, labels_aux_all, lam_all = utils_mixup.mixup(pos_1_all, args.alpha)
+
+        feature_1_all, out_1_all = net(pos_1_all_mixup)
+        feature_2_all, out_2_all = net(pos_2_all)
+
+        if args.keep_cont:
+            logits_all = out_1_all.mm(out_2_all.t()) / args.temperature
+            labels_all = torch.arange(bsz, dtype=torch.long).cuda()
+            loss_original = (lam_all * criterion(logits_all, labels_all) + (1. - lam_all) * criterion(logits_all, labels_aux_all)).mean()
+
+        env_contrastive, env_penalty = [], []
+
+        assert not isinstance(updated_split, list)
+        for env in range(args.env_num):
+            env_select_idx = utils.assign_idxs(indexs, updated_split, env)
+            pos_1, pos_2 = pos_1_all[env_select_idx], pos_2_all[env_select_idx]
+            pos_1_mixup, labels_aux, lam = utils_mixup.mixup(pos_1, args.alpha)  # pos1 re-mixup
+
+            feature_1, out_1 = net(pos_1_mixup)
+            out_2 = out_2_all[env_select_idx]
+
+            # contrastive loss
+            logits = out_1.mm(out_2.t()) / args.temperature
+            labels = torch.arange(out_1.shape[0], dtype=torch.long).cuda()
+            scale = torch.ones((1, logits.size(-1))).cuda().requires_grad_()
+            loss_cont_env = (lam * criterion(logits * scale, labels) + (1. - lam) * criterion(logits * scale, labels_aux)).mean()
+            # penalty
+            grad = autograd.grad(loss_cont_env, [scale], create_graph=True)[0]
+            penalty_score = torch.sum(grad ** 2)
+
+            # collect it into env dict
+            env_contrastive.append(loss_cont_env)
+            env_penalty.append(penalty_score)
+
+
+        loss_cont = torch.stack(env_contrastive).mean()
+        if args.keep_cont:
+            loss_cont += loss_original
+
+        if args.increasing_weight:
+            penalty_weight = utils.increasing_weight(0, args.penalty_weight, epoch, args.epochs)
+        elif args.penalty_iters < 200:
+            penalty_weight = args.penalty_weight if epoch >= args.penalty_iters else 0.
+        else:
+            penalty_weight = args.penalty_weight
+        irm_penalty = torch.stack(env_penalty).mean()
+        loss_penalty = irm_penalty
+        loss = loss_cont + penalty_weight * loss_penalty
+
+        if penalty_weight > 1.0:
+            # Rescale the entire loss to keep gradients in a reasonable range
+            loss /= penalty_weight
+
+        train_optimizer.zero_grad()
+        loss.backward()
+        train_optimizer.step()
+
+        total_num += batch_size
+        total_loss += loss.item() * batch_size
+
+        train_bar.set_description('Train Epoch: [{}/{}] [{trained_samples}/{total_samples}]  Loss: {:.4f}  LR: {:.4f}  PW {:.4f}'
+            .format(epoch, epochs, total_loss/total_num, train_optimizer.param_groups[0]['lr'], penalty_weight,
+            trained_samples=batch_index * batch_size + len(pos_1_all),
+            total_samples=len(data_loader.dataset)))
+
+        if batch_index % 10 == 0:
+            utils.write_log('Train Epoch: [{:d}/{:d}] [{:d}/{:d}]  Loss: {:.4f}  LR: {:.4f}  PW {:.4f}'.format(epoch, epochs, batch_index * batch_size + len(pos_1_all), len(data_loader.dataset),
+                                                                                                               total_loss/total_num, train_optimizer.param_groups[0]['lr'], penalty_weight), log_file=log_file)
+    return total_loss / total_num
+
+
+
+
+def train_env_mixup_full_retaingp(net, data_loader, train_optimizer, temperature, updated_split):
+    net.train()
+    total_loss, total_num, train_bar = 0.0, 0, tqdm(data_loader)
+
+    criterion = torch.nn.CrossEntropyLoss()
+
+    for batch_index, data_env in enumerate(train_bar):
+        # extract all feature
+        pos_1_all, pos_2_all, indexs = data_env[0], data_env[1], data_env[-1]
+        pos_1_all, pos_2_all = pos_1_all.cuda(non_blocking=True), pos_2_all.cuda(non_blocking=True)
+        bsz = pos_1_all.shape[0]
+        # mixup
+        pos_1_all_mixup, labels_aux_all, lam_all = utils_mixup.mixup(pos_1_all, args.alpha)
+
+        feature_1_all, out_1_all = net(pos_1_all_mixup)
+        feature_2_all, out_2_all = net(pos_2_all)
+
+        if args.keep_cont:
+            logits_all = out_1_all.mm(out_2_all.t()) / args.temperature
+            labels_all = torch.arange(bsz, dtype=torch.long).cuda()
+            loss_original = (lam_all * criterion(logits_all, labels_all) + (1. - lam_all) * criterion(logits_all, labels_aux_all)).mean()
+            loss_original.backward()
+
+        loss_env_all = []
+        assert args.retain_group
+        for updated_split_each in updated_split:
+            env_contrastive, env_penalty = [], []
+            feature_2_all, out_2_all = net(pos_2_all)
+
+            for env in range(args.env_num):
+
+                env_select_idx = utils.assign_idxs(indexs, updated_split_each, env)
+                pos_1 = pos_1_all[env_select_idx]
+                pos_1_mixup, labels_aux, lam = utils_mixup.mixup(pos_1, args.alpha) # pos1 re-mixup
+
+                feature_1, out_1 = net(pos_1_mixup)
+                out_2 = out_2_all[env_select_idx]
+
+                # contrastive loss
+                logits = out_1.mm(out_2.t()) / args.temperature
+                labels = torch.arange(out_1.shape[0], dtype=torch.long).cuda()
+                scale = torch.ones((1, logits.size(-1))).cuda().requires_grad_()
+                loss_cont_env = (lam * criterion(logits* scale, labels) + (1. - lam) * criterion(logits* scale, labels_aux)).mean()
+
+                # penalty
+                grad = autograd.grad(loss_cont_env, [scale], create_graph=True)[0]
+                penalty_score = torch.sum(grad**2)
+
+                # collect it into env dict
+                env_contrastive.append(loss_cont_env)
+                env_penalty.append(penalty_score)
+
+            loss_cont = torch.stack(env_contrastive).mean()
+
+            if args.increasing_weight:
+                penalty_weight = utils.increasing_weight(0, args.penalty_weight, epoch, args.epochs)
+            elif args.penalty_iters < 200:
+                penalty_weight = args.penalty_weight if epoch >= args.penalty_iters else 0.
+            else:
+                penalty_weight = args.penalty_weight
+            irm_penalty = torch.stack(env_penalty).mean()
+            loss_penalty = irm_penalty
+            loss_env = loss_cont + penalty_weight * loss_penalty
+
+            if penalty_weight > 1.0:
+                # Rescale the entire loss to keep gradients in a reasonable range
+                loss_env /= penalty_weight
+
+            loss_env.backward()
+            loss_env_all.append(loss_env.item())
+
+        loss = loss_original.item() + sum(loss_env_all)/len(loss_env_all) # for display
+        train_optimizer.step()
+        train_optimizer.zero_grad()
+
+        total_num += batch_size
+        total_loss += loss * batch_size
+
+        train_bar.set_description('Train Epoch: [{}/{}] [{trained_samples}/{total_samples}]  Loss: {:.4f}  LR: {:.4f}  PW {:.4f}'
+            .format(epoch, epochs, total_loss/total_num, train_optimizer.param_groups[0]['lr'], penalty_weight,
+            trained_samples=batch_index * batch_size + len(pos_1_all),
+            total_samples=len(data_loader.dataset)))
+
+        if batch_index % 10 == 0:
+            utils.write_log('Train Epoch: [{:d}/{:d}] [{:d}/{:d}]  Loss: {:.4f}  LR: {:.4f}  PW {:.4f}'.format(epoch, epochs, batch_index * batch_size + len(pos_1_all), len(data_loader.dataset),
+                                                                                                               total_loss/total_num, train_optimizer.param_groups[0]['lr'], penalty_weight), log_file=log_file)
+
+    return total_loss / total_num
+
+
+# The entrance of the maximization step
+def train_update_split(net, update_loader, soft_split, random_init=False):
+    utils.write_log('Start Maximizing ...', log_file, print_=True)
+    if random_init:
+        utils.write_log('Give a Random Split:', log_file, print_=True)
+        soft_split = torch.randn(soft_split.size(), requires_grad=True, device="cuda")
+        utils.write_log('%s' %(soft_split[:3]), log_file, print_=True)
+    else:
+        utils.write_log('Use Previous Split:', log_file, print_=True)
+        soft_split = soft_split.requires_grad_()
+        utils.write_log('%s' %(soft_split[:3]), log_file, print_=True)
+
+    if args.offline:
+        net.eval()
+        feature_bank_1, feature_bank_2 = [], []
+        labels_aux_all, lam_all = [], []
+        with torch.no_grad():
+            # generate feature bank
+            for pos_1_all, pos_2_all, target, Index in tqdm(update_loader_offline, desc='Feature extracting'):
+                pos_1_all, pos_2_all = pos_1_all.cuda(non_blocking=True), pos_2_all.cuda(non_blocking=True)
+                if args.mixup_max:
+                    # bsz = pos_1_all.shape[0]
+                    pos_1_all_mixup, labels_aux, lam = utils_mixup.mixup(pos_1_all, args.alpha)
+                    feature_1_all, out_1_all = net(pos_1_all_mixup)
+                    feature_2_all, out_2_all = net(pos_2_all)
+                    labels_aux_all.append(Index[labels_aux])
+                    lam_all.append(lam)
+                else:
+                    feature_1_all, out_1_all = net(pos_1_all)
+                    feature_2_all, out_2_all = net(pos_2_all)
+
+                feature_bank_1.append(out_1_all.cpu())
+                feature_bank_2.append(out_2_all.cpu())
+
+        feature1 = torch.cat(feature_bank_1, 0)
+        feature2 = torch.cat(feature_bank_2, 0)
+        if args.mixup_max:
+            labels_aux_all = torch.cat(labels_aux_all, 0)
+            lam_all = torch.cat(lam_all, 0)
+            updated_split = utils_mixup.auto_split_offline_mixuup(feature1, feature2, labels_aux_all, lam_all, soft_split, temperature, args.irm_temp,
+                                                     loss_mode='v2', irm_mode=args.irm_mode,
+                                                     irm_weight=args.irm_weight_maxim, constrain=args.constrain,
+                                                     cons_relax=args.constrain_relax, nonorm=args.nonorm,
+                                                     log_file=log_file)
+        else:
+            updated_split = utils.auto_split_offline(feature1, feature2, soft_split, temperature, args.irm_temp, loss_mode='v2', irm_mode=args.irm_mode,
+                                         irm_weight=args.irm_weight_maxim, constrain=args.constrain, cons_relax=args.constrain_relax, nonorm=args.nonorm, log_file=log_file)
+    else:
+        if args.mixup_max:
+            updated_split = utils_mixup.auto_split_online_mixup(net, update_loader, soft_split, temperature, args.irm_temp, args, loss_mode='v2', irm_mode=args.irm_mode,
+                                         irm_weight=args.irm_weight_maxim, constrain=args.constrain, cons_relax=args.constrain_relax, nonorm=args.nonorm, log_file=log_file)
+        else:
+            updated_split = utils.auto_split(net, update_loader, soft_split, temperature, args.irm_temp, loss_mode='v2', irm_mode=args.irm_mode,
+                                         irm_weight=args.irm_weight_maxim, constrain=args.constrain, cons_relax=args.constrain_relax, nonorm=args.nonorm, log_file=log_file)
+    np.save("results/{}/{}/{}_{}{}".format(args.dataset, args.name, 'GroupResults', epoch, ".txt"), updated_split.cpu().numpy())
+    return updated_split
+
+
+
+# test for one epoch, use weighted knn to find the most similar images' label to assign the test image
+def test(net, memory_data_loader, test_data_loader):
+    net.eval()
+    total_top1, total_top5, total_num, feature_bank = 0.0, 0.0, 0, []
+    with torch.no_grad():
+        # generate feature bank
+        for data, _, target in tqdm(memory_data_loader, desc='Feature extracting'):
+            feature, out = net(data.cuda(non_blocking=True))
+            feature_bank.append(feature)
+        # [D, N]
+        feature_bank = torch.cat(feature_bank, dim=0).t().contiguous()
+        # [N]
+        try:
+            feature_labels = torch.tensor(memory_data_loader.dataset.labels, device=feature_bank.device)
+        except:
+            feature_labels = torch.tensor(memory_data_loader.dataset.targets, device=feature_bank.device)
+        # loop test data to predict the label by weighted knn search
+        test_bar = tqdm(test_data_loader)
+        for data, _, target in test_bar:
+            data, target = data.cuda(non_blocking=True), target.cuda(non_blocking=True)
+            feature, out = net(data)
+
+            total_num += data.size(0)
+            # compute cos similarity between each feature vector and feature bank ---> [B, N]
+            sim_matrix = torch.mm(feature, feature_bank)
+            # [B, K]
+            sim_weight, sim_indices = sim_matrix.topk(k=k, dim=-1)
+            # [B, K]
+            sim_labels = torch.gather(feature_labels.expand(data.size(0), -1), dim=-1, index=sim_indices)
+            sim_weight = (sim_weight / temperature).exp()
+
+            # counts for each class
+            one_hot_label = torch.zeros(data.size(0) * k, c, device=sim_labels.device)
+            # [B*K, C]
+            one_hot_label = one_hot_label.scatter(dim=-1, index=sim_labels.view(-1, 1).long(), value=1.0)
+            # weighted score ---> [B, C]
+            pred_scores = torch.sum(one_hot_label.view(data.size(0), -1, c) * sim_weight.unsqueeze(dim=-1), dim=1)
+
+            pred_labels = pred_scores.argsort(dim=-1, descending=True)
+            total_top1 += torch.sum((pred_labels[:, :1] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            total_top5 += torch.sum((pred_labels[:, :5] == target.unsqueeze(dim=-1)).any(dim=-1).float()).item()
+            test_bar.set_description('KNN Test Epoch: [{}/{}] Acc@1:{:.2f}% Acc@5:{:.2f}%'
+                                     .format(epoch, epochs, total_top1 / total_num * 100, total_top5 / total_num * 100))
+
+    return total_top1 / total_num * 100, total_top5 / total_num * 100
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Train SimCLR')
+    parser.add_argument('--feature_dim', default=128, type=int, help='Feature dim for latent vector')
+    parser.add_argument('--temperature', default=0.5, type=float, help='Temperature used in softmax')
+    parser.add_argument('--tau_plus', default=0.1, type=float, help='Positive class priorx')
+    parser.add_argument('--k', default=200, type=int, help='Top k most similar images used to predict the label')
+    parser.add_argument('--batch_size', default=256, type=int, help='Number of images in each mini-batch')
+    parser.add_argument('--epochs', default=200, type=int, help='Number of sweeps over the dataset to train')
+    parser.add_argument('--debiased', default=False, type=bool, help='Debiased contrastive loss or standard loss')
+    parser.add_argument('--dataset', type=str, default='STL', help='experiment dataset')
+    parser.add_argument('--name', type=str, default='None', help='experiment name')
+    parser.add_argument('--pretrain_model', default=None, type=str, help='pretrain model used?')
+
+    #### ours model param ####
+    parser.add_argument('--ours_mode', default='w', type=str, help='what mode to use')
+    parser.add_argument('--penalty_weight', default=1, type=float, help='penalty weight')
+    parser.add_argument('--penalty_iters', default=0, type=int, help='penalty weight start iteration')
+    parser.add_argument('--increasing_weight', action="store_true", default=False, help='increasing the penalty weight?')
+    parser.add_argument('--env_num', default=2, type=int, help='num of the environments')
+
+    parser.add_argument('--maximize_iter', default=30, type=int, help='when maximize iteration')
+    parser.add_argument('--irm_mode', default='v1', type=str, help='irm mode when maximizing')
+    parser.add_argument('--irm_weight_maxim', default=1, type=float, help='irm weight in maximizing')
+    parser.add_argument('--irm_temp', default=0.5, type=float, help='irm loss temperature')
+    parser.add_argument('--random_init', action="store_true", default=False, help='random initialization before every time update?')
+    parser.add_argument('--constrain', action="store_true", default=False, help='make num of 2 group samples similar?')
+    parser.add_argument('--constrain_relax', action="store_true", default=False, help='relax the constrain?')
+    parser.add_argument('--retain_group', action="store_true", default=False, help='retain the previous group assignments?')
+    parser.add_argument('--retain_group_set', default=0, type=int, help='the max group to retain')
+    parser.add_argument('--debug', action="store_true", default=False, help='debug?')
+    parser.add_argument('--nonorm', action="store_true", default=False, help='not use norm for contrastive loss when maximizing')
+    parser.add_argument('--groupnorm', action="store_true", default=False, help='use group contrastive loss?')
+    parser.add_argument('--offline', action="store_true", default=False, help='save feature at the beginning of the maximize?')
+    parser.add_argument('--keep_cont', action="store_true", default=False, help='keep original contrastive?')
+
+    parser.add_argument('--baseline', action="store_true", default=False, help='use baseline?')
+    parser.add_argument('--workers', default=6, type=int, help='when maximize iteration')
+    # mixup prior
+    parser.add_argument('--alpha', default=1.0, type=float, help='mixup alpha')
+    parser.add_argument('--ours_mixup_mode', type=str, choices=['only_global', 'naive', 'full'], help='use full')
+    parser.add_argument('--mixup_max', action="store_true", default=False, help='use mixup in max?')
+
+    # args parse
+    args = parser.parse_args()
+
+    # seed
+    utils.set_seed(1234)
+
+    feature_dim, temperature, tau_plus, k = args.feature_dim, args.temperature, args.tau_plus, args.k
+    batch_size, epochs, debiased = args.batch_size, args.epochs,  args.debiased
+
+    if not os.path.exists('results/{}/{}'.format(args.dataset, args.name)):
+        os.makedirs('results/{}/{}'.format(args.dataset, args.name))
+    log_file = 'results/{}/{}/log.txt'.format(args.dataset, args.name)
+
+    # data prepare
+    if args.dataset == 'STL':
+        train_data = utils.STL10Pair_Index(root='data', split='train+unlabeled', transform=utils.train_transform)
+        train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=args.workers, pin_memory=True,
+                                  drop_last=True)
+        update_data = utils.STL10Pair_Index(root='data', split='train+unlabeled', transform=utils.train_transform)
+        update_loader = DataLoader(update_data, batch_size=2048, shuffle=True, num_workers=args.workers, pin_memory=True, drop_last=True)
+        update_loader_offline = DataLoader(update_data, batch_size=2048, shuffle=False, num_workers=args.workers, pin_memory=True)
+        memory_data = utils.STL10Pair(root='data', split='train', transform=utils.test_transform)
+        memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+        test_data = utils.STL10Pair(root='data', split='test', transform=utils.test_transform)
+        test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+    elif args.dataset == 'CIFAR10':
+        train_data = utils.CIFAR10Pair_Index(root='data', train=True, transform=utils.train_transform, download=True)
+        train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True,
+                                  drop_last=True)
+        update_data = utils.CIFAR10Pair_Index(root='data', train=True, transform=utils.train_transform)
+        update_loader = DataLoader(update_data, batch_size=3096, shuffle=True, num_workers=4, pin_memory=True, drop_last=True)
+        update_loader_offline = DataLoader(update_data, batch_size=3096, shuffle=False, num_workers=4, pin_memory=True)
+        memory_data = utils.CIFAR10Pair(root='data', train=True, transform=utils.test_transform)
+        memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+        test_data = utils.CIFAR10Pair(root='data', train=False, transform=utils.test_transform)
+        test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    elif args.dataset == 'CIFAR100':
+        train_data = utils.CIFAR100Pair_Index(root='data', train=True, transform=utils.train_transform)
+        train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=args.workers, pin_memory=True,
+                                  drop_last=True)
+        update_data = utils.CIFAR100Pair_Index(root='data', train=True, transform=utils.train_transform)
+        update_loader = DataLoader(update_data, batch_size=2048, shuffle=True, num_workers=args.workers, pin_memory=True, drop_last=True)
+        update_loader_offline = DataLoader(update_data, batch_size=2048, shuffle=False, num_workers=args.workers, pin_memory=True)
+        memory_data = utils.CIFAR100Pair(root='data', train=True, transform=utils.test_transform)
+        memory_loader = DataLoader(memory_data, batch_size=batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+        test_data = utils.CIFAR100Pair(root='data', train=False, transform=utils.test_transform)
+        test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=args.workers, pin_memory=True)
+
+    # model setup and optimizer config
+    model = Model(feature_dim).cuda()
+    model = nn.DataParallel(model)
+    # pretrain model
+    if args.pretrain_model is not None:
+        model.load_state_dict(torch.load(args.pretrain_model))
+
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-6)
+    c = len(memory_data.classes)
+    print('# Classes: {}'.format(c))
+
+    # training loop
+    if not os.path.exists('results'):
+        os.mkdir('results')
+
+    epoch = 0
+    if not args.baseline:
+        updated_split = torch.randn((len(update_data.data), args.env_num), requires_grad=True, device="cuda")
+        updated_split = train_update_split(model, update_loader, updated_split, random_init=args.random_init)
+        updated_split_all = [updated_split.clone().detach()]
+
+
+    for epoch in range(1, epochs + 1):
+        if args.baseline:
+            train_loss = train(model, train_loader, optimizer, temperature, debiased, tau_plus)
+
+        else:
+            if args.ours_mixup_mode == 'full':
+                if args.retain_group:
+                    train_loss = train_env_mixup_full_retaingp(model, train_loader, optimizer, temperature, updated_split_all)
+                else:
+                    train_loss = train_env_mixup_full_noretaingp(model, train_loader, optimizer, temperature, updated_split)
+            else:
+                raise NotImplementedError
+
+            if epoch % args.maximize_iter == 0:
+                updated_split = train_update_split(model, update_loader, updated_split, random_init=args.random_init)
+                if args.retain_group: # add partition into the partition set
+                    if args.retain_group_set == 0:
+                        updated_split_all.append(updated_split)
+                    else: # if control the partition set size
+                        assert len(updated_split_all) <= args.retain_group_set
+                        if len(updated_split_all) == args.retain_group_set:
+                            updated_split_all.append(updated_split)
+                            updated_split_all = updated_split_all[1:]
+                        else:
+                            updated_split_all.append(updated_split)
+                    print('current group num: %d' % (len(updated_split_all)))
+
+        if epoch % 25 == 0:
+            test_acc_1, test_acc_5 = test(model, memory_loader, test_loader)
+            txt_write = open("results/{}/{}/{}".format(args.dataset, args.name, 'knn_result.txt'), 'a')
+            txt_write.write('\ntest_acc@1: {}, test_acc@5: {}'.format(test_acc_1, test_acc_5))
+            torch.save(model.state_dict(), 'results/{}/{}/model_{}.pth'.format(args.dataset, args.name, epoch))

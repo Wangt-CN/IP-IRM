@@ -1,0 +1,2 @@
+CUDA_VISIBLE_DEVICES=2,3 python main_mixup.py --penalty_weight 0.2 --irm_weight_maxim 0.5 --maximize_iter 50 --random_init --constrain --constrain_relax --dataset CIFAR100 --epochs 400 --keep_cont --retain_group --name IPIRM_CIFAR100_mixup_400epoch_set5 --ours_mixup_mode full --temperature 0.2  --mixup_max  --retain_group_set 5
+CUDA_VISIBLE_DEVICES=2,3 python linear.py --model_path results/CIFAR100/IPIRM_CIFAR100_mixup_400epoch_set5/model_400.pth --dataset CIFAR100 --txt --name IPIRM_CIFAR100_mixup_400epoch_set5
