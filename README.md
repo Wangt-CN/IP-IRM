@@ -23,17 +23,15 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
 
 #### 1. Minimization Step
 
-$$
-\mathop{\mathrm{min}}_{\phi} \sum_{\mathbf{P}\in \mathcal{P}} \sum_{k=1}^2 \left[ \mathcal{L}(\phi,\theta=1, k,\mathbf{P}) + \lambda_1 ||\nabla_{\theta=1} \mathcal{L} (\phi,\theta=1,k,\mathbf{P})||^2 \right]
-$$
+<div align="center">
+  <img src="figs/step1.png" width="750px" />
+</div>
 
 #### 2. Maximization Step
 
-$$
-\mathbf{P}^* = \mathop{\mathrm{arg\,max}}_{\mathbf{P}} \sum_{k=1}^2 \left[ \mathcal{L} (\phi,\theta=1,k,\mathbf{P}) + \lambda_2 ||\nabla_{\theta=1} \mathcal{L} (\phi,\theta=1,k,\mathbf{P})||^2 \right]
-$$
-
-
+<div align="center">
+  <img src="figs/step2.png" width="780px" />
+</div>
 
 ## Prerequisites
 
