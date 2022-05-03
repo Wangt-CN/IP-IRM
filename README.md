@@ -5,7 +5,7 @@ This repository contains the official PyTorch implementation of paper "Self-Supe
 **Self-Supervised Learning Disentangled Group Representation as Feature** <br />
 [Tan Wang](https://wangt-cn.github.io/), [Zhongqi Yue](https://github.com/yue-zhongqi), Jianqiang Huang, [Qianru Sun](https://qianrusun1015.github.io), [Hanwang Zhang](https://www.ntu.edu.sg/home/hanwangzhang/) <br />
 **Conference and Workshop on Neural Information Processing Systems (NeurIPS), 2021  (Spotlight)** <br />
-**[[Paper](https://arxiv.org/abs/2110.15255)]**<br />
+**[[Paper](https://arxiv.org/abs/2110.15255)] [[Poster](https://drive.google.com/file/d/1ETPfpmttHwzuTs98LhAQMKObVJOhUq2U/view?usp=sharing)] [[Slides](https://drive.google.com/file/d/1LUSnsPFMyEGc4S0BPc6ZbmIhC_UMgr-s/view?usp=sharing)] [[Zhihu](https://zhuanlan.zhihu.com/p/483952577)]**<br />
 
 
 
@@ -100,9 +100,9 @@ CUDA_VISIBLE_DEVICES=0,1 python linear.py --model_path results/STL/IPIRM_STL_epo
 
 |                           | Epoch | $\lambda_1$ | $\lambda_2$ | Temperature |   Arch   | Latent Dim | Batch Size | Accuracy(%) |                           Download                           |
 | ------------------------- | :---: | :---------: | :---------: | :---------: | :------: | :--------: | :--------: | :---------: | :----------------------------------------------------------: |
-| IP-IRM                    |  400  |     0.2     |     0.5     |     0.5     | ResNet50 |    128     |    256     |    84.44    | [model](https://drive.google.com/file/d/18cuvztVQb7OmwRqbxXSKq2pUmVA74kms/view?usp=sharing) |
-| IP-IRM+MixUp              |  400  |     0.2     |     0.5     |     0.2     | ResNet50 |    128     |    256     |    88.26    | [model](https://drive.google.com/file/d/1PuC3WSpdeikGFF2uSMugpjxt2BAAkGRM/view?usp=sharing) |
-| IP-IRM+MixUp (1000epochs) | 1000  |     0.2     |     0.5     |     0.2     | ResNet50 |    128     |    256     |    90.59    | [model](https://drive.google.com/file/d/1H883Ix0YCuuWqOqrBVlHd5EkvyOMkNZ5/view?usp=sharing) |
+| IP-IRM                    |  400  |     0.2     |     0.5     |     0.5     | ResNet50 |    128     |    256     |    84.44    | [model](https://1drv.ms/u/s!AgehagLcK_klvj4eQFbT9hANEVXl?e=nU4Hk1) |
+| IP-IRM+MixUp              |  400  |     0.2     |     0.5     |     0.2     | ResNet50 |    128     |    256     |    88.26    | [model](https://1drv.ms/u/s!AgehagLcK_klvj4eQFbT9hANEVXl?e=nU4Hk1) |
+| IP-IRM+MixUp (1000epochs) | 1000  |     0.2     |     0.5     |     0.2     | ResNet50 |    128     |    256     |    90.59    | [model](https://1drv.ms/u/s!AgehagLcK_klvj4eQFbT9hANEVXl?e=nU4Hk1) |
 
 
 
